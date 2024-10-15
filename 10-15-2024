@@ -1,0 +1,288 @@
+#include <Wire.h>
+#include <WiFiS3.h>
+#include <MPU6050.h>
+#include "Arduino_SensorKit.h"
+
+
+// WiFi credentials for AP mode (used for initial configuration)
+const char* apSSID = "ArduinoAP";
+const char* apPassword = "12345678";
+
+// Create a server object at port 80
+WiFiServer server(80);
+
+String ssid = "";
+String password = "";
+bool credentialsReceived = false;
+bool wifiConnected = false;
+
+MPU6050 mpu;
+int16_t repsCount = 0;
+int16_t gainsCount = 0;
+int16_t setsCount = 0;
+bool lift = false;
+int16_t accelerometerX, accelerometerY, accelerometerZ;
+String reps = "Reps = ";
+String gains = "Gains = ";
+String sets = "Sets =";
+
+String getValue(String data, String key, String delimiter) {
+  int startIndex = data.indexOf(key) + key.length();
+  int endIndex = data.indexOf(delimiter, startIndex);
+  if (endIndex == -1) {
+    endIndex = data.length();
+  }
+  return data.substring(startIndex, endIndex);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.beginAP(apSSID, apPassword);
+  Serial.print("AP Mode Started. Connect to '");
+  Serial.print(apSSID);
+  Serial.println("' and use IP 192.168.4.1");
+  pinMode(8, OUTPUT);
+  pinMode(9, OUTPUT);
+  pinMode(11, OUTPUT);
+  digitalWrite(9, HIGH);
+  delay(3000);
+  digitalWrite(9, LOW);
+  digitalWrite(8, HIGH);
+  server.begin();
+  while (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(8, HIGH);
+    delay(500);
+    digitalWrite(8, LOW);
+    delay(500);
+    
+    WiFiClient client = server.available();
+
+    if (client) {
+      Serial.println("Client connected.");
+      String request = "";
+      
+      // Read the request from the client
+      while (client.connected()) {
+        if (client.available()) {
+          char c = client.read();
+          request += c;
+
+          // If the request ends with a newline, it's the end of the HTTP request
+          if (c == '\n') {
+            if (request.indexOf("POST /") != -1) {
+              // Parse the POST request to extract SSID and password
+              if (client.available()) {
+                String postBody = "";
+                while (client.available()) {
+                  postBody += client.readString();
+                }
+
+                if (postBody.indexOf("ssid=") != -1 && postBody.indexOf("password=") != -1) {
+                  ssid = getValue(postBody, "ssid=", "&");
+                  password = getValue(postBody, "password=", "&");
+
+                  // Mark credentials as received
+                  credentialsReceived = true;
+
+                  // Send a response back to the client
+                  client.println("HTTP/1.1 200 OK");
+                  client.println("Content-Type: text/plain");
+                  client.println("Connection: close");
+                  client.println();
+                  client.println("Credentials received. Attempting to connect...");
+                  delay(3000);
+                } else {
+                  client.println("HTTP/1.1 400 Bad Request");
+                  client.println("Content-Type: text/plain");
+                  client.println("Connection: close");
+                  client.println();
+                  client.println("Invalid POST request");
+                }
+              }
+            }
+            client.stop();
+          }
+        }
+      }
+    }
+
+    if (credentialsReceived) {
+    credentialsReceived = false;
+    Serial.println("Attempting to connect to WiFi...");
+
+    // Disconnect from AP mode
+    WiFi.disconnect();
+
+    // Connect to the WiFi network using the provided credentials
+    WiFi.begin(ssid.c_str(), password.c_str());
+
+    // Wait for connection to establish
+    unsigned long startAttemptTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nConnected to WiFi!");
+
+        // Get current dynamic IP, gateway, and subnet
+        IPAddress currentIP = WiFi.localIP();
+        IPAddress gateway = WiFi.gatewayIP();
+        IPAddress subnet = WiFi.subnetMask();
+
+        // Print the current dynamic IP and gateway IP
+        Serial.print("Current Dynamic IP Address: ");
+        Serial.println(currentIP);
+        Serial.print("Gateway IP Address: ");
+        Serial.println(gateway);
+
+        // Set static IP address based on the current network (changing only the last octet)
+        IPAddress staticIP(gateway[0], gateway[1], gateway[2], 50);  // Change last octet to 50
+        Serial.print("Setting Static IP Address: ");
+        Serial.println(staticIP);
+
+        // Configure the static IP
+        WiFi.config(staticIP, gateway, subnet);
+
+        wifiConnected = true;
+        break;
+      } else {
+          Serial.println("\nFailed to connect to WiFi. Check credentials.");
+          
+          // Reset to AP mode in case of failure
+          WiFi.beginAP(apSSID, apPassword);
+          Serial.println("Reverted to AP Mode.");
+      }
+    }
+  }
+  digitalWrite(8, LOW);
+  digitalWrite(11, HIGH);
+  Wire.setClock(400000);
+  Wire.begin();
+  mpu.initialize();
+  Oled.begin();
+  tone(10, 1000, 100);
+  Oled.clearDisplay();
+  Oled.setFlipMode(false);
+  delay(1000);
+  digitalWrite(11, LOW);
+  delay(1000);
+  //mpu.CalibrateAccel();
+}
+
+void loop() {
+  WiFiClient client = server.available();
+  if(client) {
+    Serial.println("New client connected");
+    // Read the request from the client
+    String request = client.readStringUntil('\r');
+    Serial.println("Request: " + request);
+    // Send response to the client
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/plain");
+    client.println();
+    String r = String(repsCount);
+    String g = String(gainsCount);
+    String s = String(setsCount);
+    String dataSend = "<"+r+">";
+    client.print(dataSend);
+    client.println();
+
+    // Close the connection
+    client.stop();
+    //Serial.println("Client disconnected");
+    //Serial.println("");
+  }
+  mpu.getMotion6(&accelerometerX, &accelerometerY, &accelerometerZ, NULL, NULL, NULL);
+  Oled.setFont(u8x8_font_chroma48medium8_r);
+  Oled.setCursor(1, 0);
+  Oled.print(reps);
+  Oled.print(String(repsCount));
+  Oled.setCursor(1, 1);
+  Oled.print(gains);
+  Oled.print(gainsCount);
+  Oled.setCursor(1, 2);
+  Oled.print(sets);
+  Oled.print(setsCount);
+  Oled.setCursor(1, 3);
+  Oled.print("X: ");
+  Oled.print(int((((((float)accelerometerX/4096)/4)+0.07)*-1)*100));
+  Oled.setCursor(1, 4);
+  Oled.print("Y: ");
+  Oled.print(int((((((float)accelerometerY/4096)/4)+0.07)*1)*100));
+  Oled.setCursor(1, 5);
+  Oled.print("Z: ");
+  Oled.print(int((((((float)accelerometerZ/4096)/4)+0.07)*-1)*100));
+  delay(20);
+  Serial.print("AccX = ");
+  Serial.println(int((((((float)accelerometerX/4096)/4)+0.07)*-1)*100));
+  Serial.print("AccY = ");
+  Serial.println(int((((((float)accelerometerY/4096)/4)+0.07)*1)*100));
+  Serial.print("AccZ = ");
+  Serial.println(int((((((float)accelerometerZ/4096)/4)+0.07)*-1)*100));
+  if(int((((((float)accelerometerY/4096)/4)+0.07)*1)*100) > 100 & lift == false & int((((((float)accelerometerX/4096)/4)+0.07)*-1)*100) < 0){
+    repsCount++;
+    tone(10, 7000, 50);
+    lift = true;
+    if(lift){
+      digitalWrite(8, HIGH);
+      digitalWrite(9, LOW);
+      if(repsCount%12==0 && repsCount>0)
+        gainsCount++;
+      if(repsCount%6==0 && repsCount>0)
+        setsCount++;
+    }
+    Serial.print("Reps Count: ");
+    Serial.println(repsCount);
+  }else if(int((((((float)accelerometerY/4096)/4)+0.07)*1)*100) < 0 & lift == true & int((((((float)accelerometerX/4096)/4)+0.07)*-1)*100) > 89){
+    lift = false;
+    if(!lift){
+      digitalWrite(8, LOW);
+      digitalWrite(9, HIGH);
+    }
+  }
+  delay(20);
+}
+
+
+
+
+
+
+
+
+/*#include <Arduino.h>
+#include <TinyMPU6050.h>
+MPU6050 mpu (Wire);
+
+bool lift = false;
+int repsCount = 0;
+
+void setup()
+{
+  // Debug console
+  Serial.begin(115200);
+
+  mpu.Initialize();
+
+  // Calibration
+  mpu.Calibrate();
+  Serial.println("Calibration complete!");
+}
+
+void loop()
+{
+  Serial.print("number of reps: ");
+  Serial.println(mpu.GetRawAccY());
+  int Xvalue = mpu.GetRawAccY();
+  mpu.Execute();
+  delay(1000);
+
+  if(Xvalue > 10000 & lift == false){
+    repsCount += 1;
+    lift = true;
+  }else if (Xvalue < -100 & lift == true)
+    lift = false;
+
+}*/
